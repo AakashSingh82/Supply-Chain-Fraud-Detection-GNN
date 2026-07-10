@@ -1,0 +1,21 @@
+{
+  "test_precision": 0.75,
+  "test_recall": 0.75,
+  "test_f1": 0.75,
+  "test_roc_auc": 0.986842105263158,
+  "test_pr_auc": 0.8910714285714285,
+  "confusion_matrix": [
+    [
+      93,
+      2
+    ],
+    [
+      2,
+      6
+    ]
+  ],
+  "n_nodes": 250,
+  "n_edges": 511,
+  "n_anomalies": 41,
+  "anomaly_rate": 0.0802348330616951
+}
