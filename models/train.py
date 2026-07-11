@@ -23,10 +23,12 @@ import torch
 import torch.nn as nn
 from sklearn.metrics import (
     precision_recall_fscore_support, roc_auc_score,
-    average_precision_score, confusion_matrix
+    average_precision_score, confusion_matrix, brier_score_loss
 )
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
+from sklearn.ensemble import IsolationForest
+from sklearn.linear_model import LogisticRegression
 
 import sys
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -166,17 +168,69 @@ def main():
     roc_auc = roc_auc_score(test_labels, test_probs)
     pr_auc = average_precision_score(test_labels, test_probs)
     cm = confusion_matrix(test_labels, test_preds).tolist()
+    uncalibrated_brier = brier_score_loss(test_labels, test_probs)
 
-    print("\n=== TEST SET RESULTS ===")
+    print("\n=== TEST SET RESULTS (raw / uncalibrated) ===")
     print(f"Precision: {p:.3f}  Recall: {r:.3f}  F1: {f1:.3f}")
     print(f"ROC-AUC: {roc_auc:.3f}  PR-AUC: {pr_auc:.3f}")
     print(f"Confusion matrix: {cm}")
+    print(f"Brier score (uncalibrated): {uncalibrated_brier:.4f}  (lower is better, 0=perfect)")
+
+    # ------------------------------------------------------------------
+    # CALIBRATION: the GAT's raw sigmoid outputs are NOT guaranteed to be
+    # well-calibrated probabilities (a 0.9 output doesn't necessarily mean
+    # "90% likely to be fraud"). We fit a simple Platt-scaling calibrator
+    # (logistic regression on the raw logit) using the VALIDATION set
+    # (never the test set, to keep evaluation honest), then re-evaluate
+    # calibration quality on the held-out test set.
+    # ------------------------------------------------------------------
+    with torch.no_grad():
+        val_logits_np = logits_final[val_idx].detach().numpy().reshape(-1, 1)
+    val_labels_np = labels[val_idx].numpy()
+
+    calibrator = LogisticRegression()
+    calibrator.fit(val_logits_np, val_labels_np)
+
+    test_logits_np = logits_final[test_idx].detach().numpy().reshape(-1, 1)
+    calibrated_test_probs = calibrator.predict_proba(test_logits_np)[:, 1]
+    calibrated_brier = brier_score_loss(test_labels, calibrated_test_probs)
+
+    print(f"Brier score (calibrated):   {calibrated_brier:.4f}")
+    print("(Calibration fitted on validation set only, evaluated on held-out test set)")
+
+    # ------------------------------------------------------------------
+    # UNSUPERVISED CROSS-CHECK: an Isolation Forest trained directly on
+    # the raw (unscaled) edge features, completely independent of the
+    # GAT and its labels. This gives a second, structurally different
+    # opinion on each transaction. When the GAT and the Isolation Forest
+    # agree, we can be more confident; when they disagree, that's a
+    # signal the case is ambiguous or potentially out-of-distribution
+    # for the GAT specifically.
+    # ------------------------------------------------------------------
+    numeric_cols = ["avg_qty", "avg_cost", "lead_time_days", "delay_variance", "order_freq_per_qtr"]
+    iso_forest = IsolationForest(
+        n_estimators=200, contamination=float(labels.mean().item()), random_state=42
+    )
+    iso_forest.fit(edges_df[numeric_cols].values)
+    # decision_function: higher = more normal, lower/negative = more anomalous.
+    # We flip and min-max normalize to a 0-1 "isolation anomaly score" for easy combination.
+    iso_raw_scores = -iso_forest.decision_function(edges_df[numeric_cols].values)
+    iso_score_min, iso_score_max = iso_raw_scores.min(), iso_raw_scores.max()
+
+    print(f"\nIsolation Forest fitted independently on raw edge features "
+          f"(contamination={labels.mean().item():.3f})")
 
     # ---------------- Save all artifacts for the dashboard ----------------
     all_probs = torch.sigmoid(logits_final).detach().numpy()
+    all_logits_np = logits_final.detach().numpy().reshape(-1, 1)
+    all_calibrated_probs = calibrator.predict_proba(all_logits_np)[:, 1]
+    all_iso_scores = (iso_raw_scores - iso_score_min) / max(iso_score_max - iso_score_min, 1e-9)
+
     edges_df_out = edges_df.copy()
     edges_df_out["predicted_prob"] = all_probs
+    edges_df_out["predicted_prob_calibrated"] = all_calibrated_probs
     edges_df_out["predicted_anomaly"] = (all_probs > 0.5).astype(int)
+    edges_df_out["isolation_forest_score"] = all_iso_scores
     edges_df_out["split"] = "train"
     edges_df_out.loc[val_idx, "split"] = "val"
     edges_df_out.loc[test_idx, "split"] = "test"
@@ -196,6 +250,8 @@ def main():
         "test_precision": p, "test_recall": r, "test_f1": f1,
         "test_roc_auc": roc_auc, "test_pr_auc": pr_auc,
         "confusion_matrix": cm,
+        "test_brier_uncalibrated": uncalibrated_brier,
+        "test_brier_calibrated": calibrated_brier,
         "n_nodes": n_nodes, "n_edges": len(edges_df),
         "n_anomalies": int(labels.sum().item()),
         "anomaly_rate": float(labels.mean().item()),
@@ -208,6 +264,19 @@ def main():
 
     torch.save(model.state_dict(), f"{OUT_DIR}/gat_model.pt")
 
+    # OOD reference stats: per-feature training distribution (post-scaling,
+    # so these are in z-score units) used to flag uploaded data that falls
+    # far outside what the model has ever seen.
+    edge_feats_scaled_df = pd.DataFrame(edge_feats_np, columns=edge_feat_names)
+    numeric_z_cols = [c for c in edge_feat_names if c.endswith("_z")]
+    ood_reference_stats = {
+        col: {
+            "p01": float(np.percentile(edge_feats_scaled_df[col], 1)),
+            "p99": float(np.percentile(edge_feats_scaled_df[col], 99)),
+        }
+        for col in numeric_z_cols
+    }
+
     with open(f"{OUT_DIR}/preprocessing.pkl", "wb") as f:
         pickle.dump({
             "node_feat_names": node_feat_names,
@@ -215,7 +284,15 @@ def main():
             "scaler": scaler,
             "node_in_dim": node_feats.shape[1],
             "edge_in_dim": edge_feats.shape[1],
+            "numeric_cols": numeric_cols,
+            "ood_reference_stats": ood_reference_stats,
         }, f)
+
+    with open(f"{OUT_DIR}/calibrator.pkl", "wb") as f:
+        pickle.dump(calibrator, f)
+
+    with open(f"{OUT_DIR}/isolation_forest.pkl", "wb") as f:
+        pickle.dump({"model": iso_forest, "score_min": float(iso_score_min), "score_max": float(iso_score_max)}, f)
 
     print(f"\nAll artifacts saved to {OUT_DIR}/")
 

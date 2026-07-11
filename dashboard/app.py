@@ -26,6 +26,10 @@ PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
 DATA_DIR = os.path.join(PROJECT_ROOT, "data")
 OUT_DIR = os.path.join(PROJECT_ROOT, "outputs")
 
+import sys
+sys.path.append(PROJECT_ROOT)
+from models.inference import score_new_supply_chain, ValidationError
+
 st.set_page_config(page_title="Supply Chain GNN Anomaly Detection", layout="wide")
 
 
@@ -65,6 +69,116 @@ st.markdown(
 )
 
 st.divider()
+
+# ============================================================
+# Let visitors upload and score their OWN supply chain data
+# ============================================================
+st.header("🧪 Try It On Your Own Data")
+st.markdown(
+    "Upload your own supply chain network and this **already-trained** model will "
+    "score every transaction for anomaly risk — no retraining needed. This works on "
+    "*any* supply chain with the schema below, not just the synthetic demo data below."
+)
+
+with st.expander("📄 Required file format (click to expand)"):
+    st.markdown("""
+**`nodes.csv`** — one row per entity:
+| column | description |
+|---|---|
+| `node_id` | unique integer ID |
+| `tier` | one of: `Supplier`, `Manufacturer`, `Warehouse`, `Retailer` |
+| `name` | display name |
+| `region` | any string (e.g. `North`, `Delhi`, `EU-West`) |
+
+**`edges.csv`** — one row per recurring transaction/shipment lane:
+| column | description |
+|---|---|
+| `src` | source node_id |
+| `dst` | destination node_id |
+| `avg_qty` | average order quantity |
+| `avg_cost` | average order cost |
+| `lead_time_days` | average delivery lead time |
+| `delay_variance` | std-dev of delivery delays |
+| `order_freq_per_qtr` | orders per quarter on this lane |
+| `transport_mode` | e.g. `Road`, `Rail`, `Air`, `Sea` |
+""")
+    st.caption("Download starter templates below and edit them with your own data.")
+    col_a, col_b = st.columns(2)
+    with open(f"{SCRIPT_DIR}/sample_nodes_template.csv", "rb") as f:
+        col_a.download_button("Download nodes.csv template", f, file_name="nodes_template.csv")
+    with open(f"{SCRIPT_DIR}/sample_edges_template.csv", "rb") as f:
+        col_b.download_button("Download edges.csv template", f, file_name="edges_template.csv")
+
+up_col1, up_col2 = st.columns(2)
+uploaded_nodes = up_col1.file_uploader("Upload nodes.csv", type="csv", key="nodes_upload")
+uploaded_edges = up_col2.file_uploader("Upload edges.csv", type="csv", key="edges_upload")
+
+if uploaded_nodes is not None and uploaded_edges is not None:
+    try:
+        user_nodes_df = pd.read_csv(uploaded_nodes)
+        user_edges_df = pd.read_csv(uploaded_edges)
+
+        with st.spinner("Validating and scoring your supply chain with the trained GAT model..."):
+            scored_nodes, scored_edges = score_new_supply_chain(user_nodes_df, user_edges_df)
+
+        n_flagged = int(scored_edges["predicted_anomaly"].sum())
+        n_ood = int(scored_edges["is_out_of_distribution"].sum())
+        reliability_counts = scored_edges["reliability"].value_counts().to_dict()
+
+        st.success(f"Done! Flagged **{n_flagged} / {len(scored_edges)}** transactions as anomalous.")
+
+        if n_ood > 0:
+            st.warning(
+                f"⚠️ **{n_ood} transactions ({n_ood/len(scored_edges):.1%}) fall outside the data range "
+                f"this model was trained on.** Predictions for these are marked **Low reliability** below — "
+                f"treat them as a rough signal, not a confident verdict. This happens when your data's scale "
+                f"or patterns (e.g. cost/quantity ranges) differ substantially from the training data."
+            )
+
+        rel_col1, rel_col2, rel_col3 = st.columns(3)
+        rel_col1.metric("🟢 High reliability", reliability_counts.get("High", 0))
+        rel_col2.metric("🟡 Medium reliability", reliability_counts.get("Medium", 0))
+        rel_col3.metric("🔴 Low reliability", reliability_counts.get("Low", 0))
+        st.caption(
+            "**High** = model and an independent Isolation Forest agree, and data is in-distribution. "
+            "**Medium** = the two models disagree (ambiguous case). "
+            "**Low** = data falls outside the model's training range — treat with caution."
+        )
+
+        node_name_lookup_user = dict(zip(scored_nodes.node_id, scored_nodes.name))
+        result_display = scored_edges.sort_values("predicted_prob_calibrated", ascending=False).copy()
+        result_display["source"] = result_display["src"].map(node_name_lookup_user)
+        result_display["destination"] = result_display["dst"].map(node_name_lookup_user)
+        result_display["confidence"] = (result_display["predicted_prob_calibrated"] * 100).round(1).astype(str) + "%"
+        result_display["reliability_icon"] = result_display["reliability"].map(
+            {"High": "🟢 High", "Medium": "🟡 Medium", "Low": "🔴 Low"}
+        )
+
+        st.dataframe(
+            result_display[["source", "destination", "confidence", "reliability_icon", "ood_features",
+                             "avg_qty", "avg_cost", "lead_time_days", "delay_variance",
+                             "order_freq_per_qtr"]].rename(columns={
+                                 "reliability_icon": "reliability", "ood_features": "flagged_features"
+                             }).reset_index(drop=True),
+            width="stretch", height=350
+        )
+
+        csv_bytes = scored_edges.to_csv(index=False).encode("utf-8")
+        st.download_button("Download full results as CSV", csv_bytes, file_name="scored_transactions.csv")
+
+    except ValidationError as e:
+        st.error(f"❌ Your files didn't pass validation:\n\n{str(e).replace(' | ', chr(10) + '- ')}")
+        st.caption("Fix the issues above and re-upload. Check the format guide above for the expected schema.")
+    except Exception as e:
+        st.error(f"Something unexpected went wrong: {e}")
+        st.caption("Double check your CSVs match the required format above, including exact column names and types.")
+else:
+    st.info("Upload both files above to get anomaly scores on your own data.")
+
+st.divider()
+st.header("📊 Demo: Synthetic Supply Chain Network")
+st.caption("Everything below uses the synthetic demo data this model was trained on.")
+
 
 # ------------------------------------------------------------------ sidebar controls
 st.sidebar.header("Filters")

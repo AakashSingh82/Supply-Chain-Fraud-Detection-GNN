@@ -14,6 +14,8 @@
       6
     ]
   ],
+  "test_brier_uncalibrated": 0.024754352867603302,
+  "test_brier_calibrated": 0.024205219000577927,
   "n_nodes": 250,
   "n_edges": 511,
   "n_anomalies": 41,
