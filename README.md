@@ -11,15 +11,7 @@ chain as a graph** — suppliers, manufacturers, warehouses, and retailers as no
 edges — and trains a **Graph Attention Network (GAT), built from scratch in PyTorch**, to flag
 fraudulent or anomalous transaction lanes.
 
-**[🚀 Live Demo](#)** ← replace with your Streamlit Cloud URL once deployed
-
----
-
-## 📸 Preview
-
-![Network anomalies](assets/fig_network_anomalies.png)
-
-*The full supply chain network — every red line is a transaction the model flagged as anomalous. Blue = suppliers, green = manufacturers, red-brown = warehouses, purple = retailers.*
+**[🚀 Live Demo] https://supply-chain-fraud-detection-gnn-nxmecamzghas7yrua9kj7f.streamlit.app/)](https://supply-chain-fraud-detection-gnn-24p2kqt3bmodytbdkjnf5z.streamlit.app/**
 
 ---
 
@@ -36,7 +28,9 @@ or a disruption spreading outward from one hub.
 
 This project treats the graph structure as first-class information, and uses the GAT's
 **attention weights as an explainability mechanism** — so every flagged transaction comes with
-a "why," not just a bare anomaly score.
+a "why," not just a bare anomaly score. On top of that, it includes a full **reliability layer**
+(calibration, out-of-distribution detection, an independent cross-check model) so the system is
+honest about when it's confident versus when it's guessing — see the section below.
 
 ---
 
@@ -45,18 +39,21 @@ a "why," not just a bare anomaly score.
 ```
 scgnn/
 ├── data/
-│   ├── generate_graph.py        # Synthetic multi-tier supply chain + injected anomalies
-│   ├── nodes.csv                 # Generated: 250 entities across 4 tiers
-│   ├── edges.csv                 # Generated: 511 transaction lanes
+│   ├── generate_graph.py          # Synthetic multi-tier supply chain + injected anomalies
+│   ├── nodes.csv                  # Generated: 250 entities across 4 tiers
+│   ├── edges.csv                  # Generated: 511 transaction lanes
 │   └── graph.gpickle              # Generated: NetworkX graph object
 ├── models/
-│   ├── gat.py                    # Custom Graph Attention Network (pure PyTorch)
-│   └── train.py                  # Training pipeline, evaluation, artifact export
+│   ├── gat.py                     # Custom Graph Attention Network (pure PyTorch)
+│   ├── train.py                   # Training pipeline, calibration, evaluation, artifact export
+│   └── inference.py                # Production inference: validation, OOD detection, reliability scoring
 ├── dashboard/
-│   ├── app.py                    # Interactive Streamlit dashboard
-│   └── export_static_visuals.py  # Static PNG exports for README/portfolio
-├── outputs/                       # Trained model + evaluation artifacts
-├── assets/                        # README images
+│   ├── app.py                     # Interactive Streamlit dashboard
+│   ├── export_static_visuals.py   # Static PNG exports for README/portfolio
+│   ├── sample_nodes_template.csv  # Starter template for the "try your own data" feature
+│   └── sample_edges_template.csv  # Starter template for the "try your own data" feature
+├── outputs/                        # Trained model + evaluation artifacts (model, calibrator, isolation forest, logs)
+├── assets/                         # README images
 ├── requirements.txt
 └── README.md
 ```
@@ -122,30 +119,65 @@ dashboard (larger node = more attention received).
 | F1 | 0.75 |
 | ROC-AUC | **0.987** |
 | PR-AUC | 0.891 |
+| Brier score (calibrated) | 0.024 |
 
 The model was **never given the anomaly type during training** — only a binary `is_anomaly`
 label. Recovering strong detection across all four structurally distinct anomaly types suggests
 it learned real underlying graph/feature patterns rather than memorizing one signature.
 
-![Training curves](assets/fig_training_curves.png)
-![Anomaly breakdown](assets/fig_anomaly_breakdown.png)
+---
+
+## 🧪 Try it on your own data — and its honest limits
+
+The dashboard includes a **"Try It On Your Own Data"** section where you can upload any
+supply chain (matching the documented schema) and get every transaction scored by the
+already-trained model, no retraining required.
+
+**Important honesty note:** this model was trained entirely on synthetic data with 4
+deliberately injected anomaly patterns. It has never seen real fraud. So rather than silently
+pretending to be accurate on any dataset thrown at it, the inference pipeline includes several
+layers that make the system honest about its own limits:
+
+- **Input validation** — malformed CSVs (missing columns, bad tiers, negative values, dangling
+  references) get clear, specific error messages instead of a stack trace.
+- **Calibrated probabilities** — the GAT's raw sigmoid output is passed through a Platt-scaling
+  calibrator (fit on a held-out validation set) so a "0.9" score means something closer to an
+  actual 90% likelihood, not just an arbitrary large number.
+- **Out-of-distribution (OOD) detection** — every uploaded transaction's numeric features are
+  checked against the 1st-99th percentile range seen during training. Transactions outside that
+  range are flagged — this is what happens when someone's cost/quantity scales are simply
+  different from the synthetic training data.
+- **An independent Isolation Forest cross-check** — a completely separate unsupervised model,
+  trained directly on raw features with no graph structure and no labels, gives a second
+  opinion. When it agrees with the GAT, confidence goes up; when it disagrees, that's flagged.
+- **A combined reliability score (🟢 High / 🟡 Medium / 🔴 Low)** shown per transaction, so a
+  user knows how much to trust each specific result rather than treating every output as
+  equally certain.
+- **Logging** — every inference run logs input size, timing, how many were flagged, and how
+  many were out-of-distribution, to `outputs/inference.log`.
+
+This is the honest engineering answer to "would this work on real company data?" — the *pipeline*
+is production-grade (validated inputs, calibrated outputs, a documented reliability signal), but
+the *learned patterns* are only proven on synthetic data, and the system says so rather than
+guessing silently.
 
 ---
 
 ## ⚙️ Running it locally
 
 ```bash
-git clone https://github.com/<your-username>/<your-repo>.git
-cd <your-repo>
+git clone https://github.com/AakashSingh82/Supply-Chain-Fraud-Detection-GNN.git
+cd Supply-Chain-Fraud-Detection-GNN
+
 pip install -r requirements.txt
 
 # 1. Generate the synthetic supply chain graph + injected anomalies
 python data/generate_graph.py
 
-# 2. Train the GAT and export evaluation artifacts
+# 2. Train the GAT, fit the calibrator + isolation forest, and export evaluation artifacts
 python models/train.py
 
-# 3. (Optional) export static PNGs
+# 3. (Optional) export static PNGs for a README/portfolio
 python dashboard/export_static_visuals.py
 
 # 4. Launch the interactive dashboard
@@ -156,52 +188,14 @@ streamlit run dashboard/app.py
 
 ## ☁️ Deploying on Streamlit Community Cloud
 
-1. Push this entire repo to GitHub (see checklist below)
+1. Push this entire repo to GitHub (make sure `data/`, `outputs/` generated files are committed —
+   the dashboard reads them directly, and Streamlit Cloud won't run the training scripts for you)
 2. Go to [share.streamlit.io](https://share.streamlit.io) and sign in with GitHub
 3. Click **"New app"**, select your repo/branch
 4. Set **Main file path** to: `dashboard/app.py`
-5. Deploy
-
-**Important:** the dashboard reads pre-computed files from `data/` and `outputs/` — make sure
-those generated CSVs/artifacts are committed to the repo (see below), or the app will error out
-looking for files that don't exist on the cloud server.
+5. Deploy — Streamlit Cloud automatically redeploys on every future push to `main`
 
 ---
-
-## Trying it on your own data — and its honest limits
-
-The dashboard includes a **"Try It On Your Own Data"** section where you can upload any
-supply chain (matching the documented schema) and get every transaction scored by the
-already-trained model, no retraining required.
-
-**Important honesty note:** this model was trained entirely on synthetic data with 4
-deliberately injected anomaly patterns. It has never seen real fraud. So rather than
-silently pretending to be accurate on any dataset thrown at it, the inference pipeline
-includes several layers that make the system honest about its own limits:
-
-- **Input validation** — malformed CSVs (missing columns, bad tiers, negative values,
-  dangling references) get clear, specific error messages instead of a stack trace.
-- **Calibrated probabilities** — the GAT's raw sigmoid output is passed through a
-  Platt-scaling calibrator (fit on a held-out validation set) so a "0.9" score means
-  something closer to an actual 90% likelihood, not just an arbitrary large number.
-- **Out-of-distribution (OOD) detection** — every uploaded transaction's numeric features
-  are checked against the 1st-99th percentile range seen during training. Transactions
-  outside that range are flagged — this is what happens when someone's cost/quantity
-  scales are simply different from the synthetic training data.
-- **An independent Isolation Forest cross-check** — a completely separate unsupervised
-  model, trained directly on raw features with no graph structure and no labels, gives a
-  second opinion. When it agrees with the GAT, confidence goes up; when it disagrees,
-  that's flagged too.
-- **A combined reliability score (High/Medium/Low)** shown per transaction, so a user
-  knows how much to trust each specific result rather than treating every output as
-  equally certain.
-- **Logging** — every inference run logs input size, timing, how many were flagged, and
-  how many were out-of-distribution, to `outputs/inference.log`.
-
-This is the honest engineering answer to "would this work on real company data?" — the
-answer is that the *pipeline* is production-grade (validated inputs, calibrated outputs,
-a documented reliability signal), but the *learned patterns* are only proven on synthetic
-data, and the system says so rather than guessing silently.
 
 ## 🔭 Possible extensions
 
@@ -209,13 +203,25 @@ data, and the system says so rather than guessing silently.
 - **Real-world validation** — re-run the pipeline on a real dataset (e.g. DataCo Supply Chain)
 - **Active learning loop** — prioritize the most uncertain flagged edges for human review
 - **Multi-hop counterfactuals** — "what minimal change would make this transaction look normal?"
+- **Domain adaptation** — cheaply re-fit the scaler/calibrator on a new company's data distribution
+  without full retraining, to reduce out-of-distribution rates on real-world uploads
 
 ---
 
-## 🛠️ Tech stack
+## 🛠️ Technologies Used
 
-PyTorch (custom GAT) · NetworkX (graph construction) · scikit-learn (metrics, preprocessing) ·
-Streamlit + Plotly (dashboard) · Matplotlib (static exports)
+| Category | Technology | Purpose |
+|---|---|---|
+| **Language** | Python 3.9+ | Core implementation |
+| **Deep Learning** | PyTorch | Custom Graph Attention Network (built from scratch, no `torch_geometric`) |
+| **Graph construction** | NetworkX | Building and representing the supply chain as a graph |
+| **Classical ML** | scikit-learn | Train/test splitting, evaluation metrics, `StandardScaler`, Platt-scaling calibration (`LogisticRegression`), `IsolationForest` cross-check |
+| **Data handling** | pandas, NumPy | Feature engineering, data manipulation |
+| **Dashboard/UI** | Streamlit | Interactive web dashboard, file upload, live scoring |
+| **Visualization** | Plotly | Interactive network graph and charts inside the dashboard |
+| **Visualization** | Matplotlib | Static PNG exports for README/portfolio |
+| **Deployment** | Streamlit Community Cloud | Free hosting, auto-redeploys on every GitHub push |
+| **Version control** | Git + GitHub | Source control and collaboration |
 
 ---
 
