@@ -1,17 +1,3 @@
-"""
-Supply Chain Fraud & Disruption Detection — Interactive Dashboard
-------------------------------------------------------------------
-Run with:  streamlit run app.py
-
-Shows:
-  - Network graph with anomalous lanes highlighted
-  - Model performance metrics (precision/recall/F1/ROC-AUC/PR-AUC)
-  - Training curves
-  - Ranked list of top flagged transactions with model confidence
-  - Node-level "suspicion score" from attention weights (explainability)
-  - Drill-down: click any flagged edge to see WHY it was flagged
-"""
-
 import json
 import os
 
