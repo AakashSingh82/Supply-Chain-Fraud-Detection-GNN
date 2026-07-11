@@ -11,7 +11,7 @@ chain as a graph** — suppliers, manufacturers, warehouses, and retailers as no
 edges — and trains a **Graph Attention Network (GAT), built from scratch in PyTorch**, to flag
 fraudulent or anomalous transaction lanes.
 
-**[🚀 Live Demo] https://supply-chain-fraud-detection-gnn-nxmecamzghas7yrua9kj7f.streamlit.app/)](https://supply-chain-fraud-detection-gnn-24p2kqt3bmodytbdkjnf5z.streamlit.app/**
+**[🚀 Live Demo] https://supply-chain-fraud-detection-gnn-24p2kqt3bmodytbdkjnf5z.streamlit.app/**
 
 ---
 
